@@ -668,7 +668,7 @@ function openSettings() {
         h('button', { class: 'btn small', type: 'button', onclick: () => openFolder('library') }, icon('folder'), '보관 폴더 열기'),
         h('button', { class: 'btn small', type: 'button', onclick: () => openFolder('backups') }, icon('folder'), '백업 폴더 열기'),
         h('button', { class: 'btn small', type: 'button', onclick: () => openFolder('log') }, '로그 보기'))),
-    h('p', { class: 'muted', style: 'font-size:12.5px' }, `모드 매니저 v${state?.appVersion || ''}${state && !state.sevenZip ? ' · 7-Zip이 없어 .7z/.rar 파일은 추가할 수 없어요' : ''}`),
+    h('p', { class: 'muted', style: 'font-size:12.5px' }, `Modocracy v${state?.appVersion || ''}${state && !state.sevenZip ? ' · 7-Zip이 없어 .7z/.rar 파일은 추가할 수 없어요' : ''}`),
   ];
   return openModal({
     title: '설정',

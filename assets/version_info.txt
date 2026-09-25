@@ -4,11 +4,11 @@ VSVersionInfo(
   kids=[
     StringFileInfo([
       StringTable('041204B0', [
-        StringStruct('FileDescription', 'Helldivers 2 Mod Manager'),
+        StringStruct('FileDescription', 'Modocracy - Helldivers 2 mod manager'),
         StringStruct('FileVersion', '1.0.0'),
-        StringStruct('InternalName', 'HD2ModManager'),
-        StringStruct('OriginalFilename', 'HD2ModManager.exe'),
-        StringStruct('ProductName', 'HD2 Mod Manager'),
+        StringStruct('InternalName', 'Modocracy'),
+        StringStruct('OriginalFilename', 'Modocracy.exe'),
+        StringStruct('ProductName', 'Modocracy'),
         StringStruct('ProductVersion', '1.0.0')])
     ]),
     VarFileInfo([VarStruct('Translation', [0x0412, 1200])])

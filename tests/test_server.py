@@ -218,7 +218,7 @@ class InstanceTests(unittest.TestCase):
             self.assertTrue(app.acquire_instance_mutex(path))
             self.assertEqual(handles, [123])
             name = kernel.CreateMutexW.call_args.args[2]
-            self.assertTrue(name.startswith("Local\\HD2ModManager-"))
+            self.assertTrue(name.startswith("Local\\Modocracy-"))
             self.assertEqual(len(name.rsplit("-", 1)[1]), 40)
             error.return_value = 183
             self.assertFalse(app.acquire_instance_mutex(Path(tmp) / "data" / "."))
@@ -281,6 +281,42 @@ class LifecycleTests(unittest.TestCase):
         sock.close()  # 창 닫힘
         thread.join(timeout=20)
         self.assertFalse(thread.is_alive(), "창이 닫히면 스스로 종료해야 함")
+
+
+class LegacyDataTests(unittest.TestCase):
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="hd2mm-legacy-"))
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.legacy = self.base / "HD2ModManager"
+        self.new = self.base / "Modocracy"
+
+    def write_legacy(self, settings):
+        (self.legacy / "mods" / "abc").mkdir(parents=True)
+        (self.legacy / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    def test_moves_old_library_to_new_name(self):
+        self.write_legacy({"version": 1, "gamePath": "C:\\game", "mods": [{"id": "abc", "enabled": True}]})
+        self.assertTrue(app.migrate_legacy_data(self.new))
+        self.assertFalse(self.legacy.exists())
+        self.assertTrue((self.new / "mods" / "abc").is_dir())
+
+    def test_leaves_other_programs_folder_alone(self):
+        self.write_legacy({"Mods": [], "Profile": "x"})
+        self.assertTrue(app.migrate_legacy_data(self.new))
+        self.assertTrue((self.legacy / "settings.json").exists())
+        self.assertFalse(self.new.exists())
+
+    def test_keeps_existing_new_library(self):
+        self.write_legacy({"version": 1, "gamePath": None, "mods": []})
+        self.new.mkdir()
+        self.assertTrue(app.migrate_legacy_data(self.new))
+        self.assertTrue(self.legacy.exists())
+
+    def test_reports_when_old_folder_is_in_use(self):
+        self.write_legacy({"version": 1, "gamePath": None, "mods": []})
+        with mock.patch.object(app.os, "replace", side_effect=PermissionError("in use")):
+            self.assertFalse(app.migrate_legacy_data(self.new))
+        self.assertTrue(self.legacy.exists())
 
 
 if __name__ == "__main__":

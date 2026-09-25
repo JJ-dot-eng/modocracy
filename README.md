@@ -1,12 +1,22 @@
-# Helldivers 2 모드 매니저
+# Modocracy
 
-Helldivers 2 모드(`.patch_0` 파일 형태)를 추가·정리하고 게임에 한 번에 적용하는 프로그램입니다.
+**Helldivers 2용 비공식 모드 매니저** — 관리형 모드주의(Managed Modocracy)를 위하여.
+
+Helldivers 2 모드(`.patch_0` 파일 형태)를 추가·정리하고 게임에 한 번에 적용하는 Windows 프로그램입니다.
 Arsenal, HD2MM에서 쓰는 모드 압축 파일(`manifest.json` 포함)을 그대로 넣을 수 있습니다.
 
-## 실행
+> Modocracy는 팬이 만든 비공식 도구이며 Arrowhead Game Studios, Sony Interactive Entertainment와 관련이 없습니다.
+> 모드 사용과 그로 인한 문제는 사용자 책임입니다.
 
-`dist\HD2ModManager.exe` 를 더블클릭하세요. 전용 창(Edge 앱 창)이 열리고, 창을 닫으면 프로그램도 저절로 꺼집니다.
-처음 실행하면 Steam에 설치된 게임 폴더를 자동으로 찾습니다. 못 찾으면 오른쪽 위 ⚙ 설정에서 지정하세요.
+## 다운로드와 실행
+
+1. [Releases](../../releases/latest)에서 `Modocracy.exe` 를 받습니다. 설치 없이 바로 실행됩니다.
+2. 더블클릭하면 전용 창(Edge 앱 창)이 열리고, 창을 닫으면 프로그램도 저절로 꺼집니다.
+3. 처음 실행하면 Steam에 설치된 게임 폴더를 자동으로 찾습니다. 못 찾으면 오른쪽 위 ⚙ 설정에서 지정하세요.
+
+코드 서명이 없는 프로그램이라 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있습니다. **추가 정보 → 실행** 을 누르세요.
+
+**필요한 것:** Windows 10/11, Microsoft Edge(기본 설치됨). `.7z`, `.rar` 모드를 쓰려면 [7-Zip](https://www.7-zip.org/)도 필요합니다.
 
 ## 사용 순서
 
@@ -32,19 +42,21 @@ Arsenal, HD2MM에서 쓰는 모드 압축 파일(`manifest.json` 포함)을 그�
   한 가지만 쓰는 것을 권장합니다.
 - 게임을 켠 상태에서는 적용·제거할 수 없습니다. 게임 업데이트 후 모드 파일이 사라지면 상태 표시줄이 알려 주니
   `적용하기` 를 다시 누르세요.
-- `.7z`, `.rar` 파일은 [7-Zip](https://www.7-zip.org/)이 설치되어 있어야 풀 수 있습니다.
+- 게임 `bin` 폴더에 직접 복사하는 방식(ReShade 기반 등)의 모드는 다루지 않습니다.
+- 게임을 종료할 때 게임의 "오류 신고" 창이 뜨는 경우가 있는데, 모드가 없어도 생기는 게임 자체의 문제입니다.
 
 ## 파일 저장 위치
 
-추가한 모드, 설정, 백업, 로그는 `%LOCALAPPDATA%\HD2ModManager` 에 저장됩니다(설정 화면에서 열 수 있음).
-exe 파일 옆에 `ModManagerData` 폴더를 만들어 두면 그 폴더를 대신 사용합니다(USB 등 휴대용).
+추가한 모드, 설정, 백업, 로그는 `%LOCALAPPDATA%\Modocracy` 에 저장됩니다(설정 화면에서 열 수 있음).
+exe 파일 옆에 `ModocracyData` 폴더를 만들어 두면 그 폴더를 대신 사용합니다(USB 등 휴대용).
+이전 이름(HD2ModManager)으로 쓰던 보관 폴더는 처음 실행할 때 자동으로 옮겨집니다.
 
 ## 개발자용
 
 ```bat
 python -m hd2mm                 :: 소스에서 바로 실행
 python -m unittest discover -s tests -t .   :: 테스트
-build.bat                       :: 테스트 후 dist\HD2ModManager.exe 생성 (PyInstaller 필요)
+build.bat                       :: 테스트 후 dist\Modocracy.exe 생성 (PyInstaller 필요)
 ```
 
 - `hd2mm/core.py` — 모드 해석(manifest), 보관함, 적용·제거·백업 로직
@@ -54,3 +66,7 @@ build.bat                       :: 테스트 후 dist\HD2ModManager.exe 생성 (
 - 적용 규칙: 켜진 모드를 목록 위→아래 순서로 훑으며, 같은 아카이브(`9ba626afa44a3aa3` 등)의 패치 파일에
   `patch_0, patch_1, …` 번호를 새로 매겨 게임 `data` 폴더에 복사합니다. 매니저가 설치한 파일 목록은
   `deployed.json` 에 기록해 두었다가 다음 적용·제거 때 정확히 그 파일만 지웁니다.
+
+## 라이선스
+
+[MIT](LICENSE)

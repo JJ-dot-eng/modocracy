@@ -92,7 +92,7 @@ class AppServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     server: AppServer
-    server_version = f"HD2ModManager/{__version__}"
+    server_version = f"Modocracy/{__version__}"
 
     def log_message(self, fmt, *args):
         log.debug("%s - %s", self.address_string(), fmt % args)

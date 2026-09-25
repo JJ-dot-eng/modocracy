@@ -14,7 +14,7 @@ import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from . import APP_NAME, __version__, gameinfo
+from . import APP_NAME, LEGACY_APP_NAME, __version__, gameinfo
 from .core import Library, write_json
 from .server import AppServer
 
@@ -35,7 +35,7 @@ def acquire_instance_mutex(data_dir: Path) -> bool:
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     normalized = os.path.normpath(str(data_dir.resolve())).lower()
-    name = "Local\\HD2ModManager-" + hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+    name = f"Local\\{APP_NAME}-" + hashlib.sha1(normalized.encode("utf-8")).hexdigest()
     handle = kernel32.CreateMutexW(None, False, name)
     error = ctypes.get_last_error()
     if not handle:
@@ -53,12 +53,33 @@ def web_dir() -> Path:
 
 
 def default_data_dir() -> Path:
-    """exe 옆에 ModManagerData 폴더가 있으면 그곳(휴대용), 아니면 %LOCALAPPDATA%."""
+    """exe 옆에 ModocracyData 폴더가 있으면 그곳(휴대용), 아니면 %LOCALAPPDATA%\\Modocracy."""
     exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
-    if exe_dir and (exe_dir / "ModManagerData").is_dir():
-        return exe_dir / "ModManagerData"
+    if exe_dir and (exe_dir / "ModocracyData").is_dir():
+        return exe_dir / "ModocracyData"
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return Path(base) / APP_NAME
+
+
+def migrate_legacy_data(data_dir: Path) -> bool:
+    """이름을 바꾸기 전 보관 폴더(%LOCALAPPDATA%\\HD2ModManager)가 있으면 새 위치로 옮긴다.
+
+    옮길 필요가 없거나 옮겼으면 True, 옛 폴더가 사용 중이라 옮기지 못했으면 False.
+    """
+    legacy = data_dir.parent / LEGACY_APP_NAME
+    if data_dir.exists() or not (legacy / "settings.json").is_file():
+        return True
+    try:
+        settings = json.loads((legacy / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    if not isinstance(settings, dict) or "mods" not in settings or "gamePath" not in settings:
+        return True  # 이름이 같은 다른 프로그램의 폴더일 수 있으니 건드리지 않는다
+    try:
+        os.replace(legacy, data_dir)
+    except OSError:
+        return False
+    return True
 
 
 def setup_logging(data_dir: Path, verbose: bool) -> None:
@@ -112,20 +133,21 @@ def show_error(message: str) -> None:
     if sys.platform == "win32":
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, message, "Helldivers 2 모드 매니저", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
     else:
         print(message, file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Helldivers 2 모드 매니저")
-    parser.add_argument("--data-dir", help="모드 보관 폴더 (기본: %%LOCALAPPDATA%%\\HD2ModManager)")
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} - Helldivers 2 모드 매니저")
+    parser.add_argument("--data-dir", help=f"모드 보관 폴더 (기본: %%LOCALAPPDATA%%\\{APP_NAME})")
     parser.add_argument("--port", type=int, default=PREFERRED_PORT)
     parser.add_argument("--no-window", action="store_true", help="창을 열지 않고 서버만 실행 (개발용)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
-    data_dir = Path(args.data_dir or os.environ.get("HD2MM_DATA_DIR") or default_data_dir()).resolve()
+    custom_dir = args.data_dir or os.environ.get("HD2MM_DATA_DIR")
+    data_dir = Path(custom_dir or default_data_dir()).resolve()
     try:
         acquired = acquire_instance_mutex(data_dir)
     except OSError as exc:
@@ -143,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             time.sleep(0.2)
         show_error("실행 중인 모드 매니저가 응답하지 않아요. 잠시 후 다시 실행해 주세요.")
+        return 1
+    if not custom_dir and not migrate_legacy_data(data_dir):
+        show_error("이전 버전(HD2ModManager)이 실행 중이라 설정을 옮기지 못했어요.\n이전 버전 창을 닫고 다시 실행해 주세요.")
         return 1
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     url = f"http://127.0.0.1:{server.port}/"
     instance_file = data_dir / "instance.json"
     write_json(instance_file, {"port": server.port, "pid": os.getpid()})
-    log.info("모드 매니저 %s 시작: %s (보관 폴더 %s)", __version__, url, data_dir)
+    log.info("%s %s 시작: %s (보관 폴더 %s)", APP_NAME, __version__, url, data_dir)
     if not args.no_window:
         open_window(url + "?app=1")
     try:
