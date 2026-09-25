@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import mimetypes
 import os
 import secrets
 import threading
@@ -27,6 +26,10 @@ STATIC_FILES = {
     "/icon.svg": "icon.svg",
 }
 MAX_JSON_BYTES = 1024 * 1024
+RASTER_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+}
 
 
 class AppServer(ThreadingHTTPServer):
@@ -40,6 +43,8 @@ class AppServer(ThreadingHTTPServer):
         self.lock = threading.RLock()     # 보관함·게임 폴더 작업은 한 번에 하나씩
         self.dialog_lock = threading.Lock()
         self.clients = 0
+        self.active_operations = 0
+        self.stopping = False
         self.ever_connected = False
         self.last_change = time.monotonic()
         self.client_lock = threading.Lock()
@@ -58,17 +63,31 @@ class AppServer(ThreadingHTTPServer):
 
     def _watch_clients(self) -> None:
         """창이 모두 닫히면(연결이 끊기면) 프로그램을 끝낸다."""
-        started = time.monotonic()
         while True:
             time.sleep(1)
             with self.client_lock:
-                idle = self.clients == 0
+                idle = self.clients == 0 and self.active_operations == 0
                 since = time.monotonic() - self.last_change
                 ever = self.ever_connected
-            if idle and ((ever and since > 5) or (not ever and time.monotonic() - started > 120)):
+                stop = idle and since > (5 if ever else 120)
+                if stop:
+                    self.stopping = True
+            if stop:
                 log.info("열린 창이 없어 종료합니다.")
                 self.shutdown()
                 return
+
+    def begin_operation(self) -> bool:
+        with self.client_lock:
+            if self.stopping:
+                return False
+            self.active_operations += 1
+            return True
+
+    def end_operation(self) -> None:
+        with self.client_lock:
+            self.active_operations -= 1
+            self.last_change = time.monotonic()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -161,14 +180,16 @@ class Handler(BaseHTTPRequestHandler):
         target = safe_join(root, rel)
         if target is None or not target.is_file():
             return self._error("not found", 404)
-        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        if not ctype.startswith("image/"):
+        ctype = RASTER_TYPES.get(target.suffix.lower())
+        if ctype is None:
             return self._error("not found", 404)
         data = target.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "sandbox; default-src 'none'")
         self.end_headers()
         self.wfile.write(data)
 
@@ -196,6 +217,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._host_ok() or self.headers.get("X-HD2MM-Token") != self.server.token:
             return self._error("forbidden", 403)
+        if not self.server.begin_operation():
+            return self._error("프로그램이 종료 중이에요. 다시 실행해 주세요.", 503)
+        try:
+            self._handle_post()
+        finally:
+            self.server.end_operation()
+
+    def _handle_post(self):
         url = urlsplit(self.path)
         path, query = url.path, parse_qs(url.query)
         try:
@@ -364,7 +393,7 @@ def build_state(lib: Library) -> dict:
             stamp = int(root.stat().st_mtime)
 
             def url(rel):
-                return f"/api/mods/{quote(snap.id)}/file?path={quote(rel)}&v={stamp}" if rel else None
+                return f"/api/mods/{quote(snap.id)}/file?path={quote(rel)}&v={stamp}" if rel and Path(rel).suffix.lower() in RASTER_TYPES else None
 
             extra = info.extra or {}
             mod.update({

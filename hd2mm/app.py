@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 import webbrowser
 from logging.handlers import RotatingFileHandler
@@ -18,6 +20,31 @@ from .server import AppServer
 
 PREFERRED_PORT = 47815
 log = logging.getLogger("hd2mm")
+_mutex_handles = []
+
+
+def acquire_instance_mutex(data_dir: Path) -> bool:
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    normalized = os.path.normpath(str(data_dir.resolve())).lower()
+    name = "Local\\HD2ModManager-" + hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+    handle = kernel32.CreateMutexW(None, False, name)
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    if error == 183:
+        kernel32.CloseHandle(handle)
+        return False
+    _mutex_handles.append(handle)  # 프로세스가 끝날 때까지 핸들을 유지한다.
+    return True
 
 
 def web_dir() -> Path:
@@ -100,6 +127,24 @@ def main(argv: list[str] | None = None) -> int:
 
     data_dir = Path(args.data_dir or os.environ.get("HD2MM_DATA_DIR") or default_data_dir()).resolve()
     try:
+        acquired = acquire_instance_mutex(data_dir)
+    except OSError as exc:
+        show_error(f"실행 중인 모드 매니저를 확인하지 못했어요.\n\n{exc}")
+        return 1
+    if not acquired:
+        if args.no_window:
+            log.error("같은 보관함의 모드 매니저가 이미 실행 중이에요.")
+            return 1
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            existing = running_instance(data_dir)
+            if existing:
+                open_window(existing + "?app=1")
+                return 0
+            time.sleep(0.2)
+        show_error("실행 중인 모드 매니저가 응답하지 않아요. 잠시 후 다시 실행해 주세요.")
+        return 1
+    try:
         data_dir.mkdir(parents=True, exist_ok=True)
         setup_logging(data_dir, args.verbose)
     except OSError as exc:
@@ -107,7 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     existing = running_instance(data_dir)
-    if existing and not args.no_window:
+    if existing:
+        if args.no_window:
+            log.error("같은 보관함의 모드 매니저가 이미 실행 중이에요.")
+            return 1
         open_window(existing + "?app=1")
         return 0
 

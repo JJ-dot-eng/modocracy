@@ -13,10 +13,11 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from hd2mm import gameinfo
+from hd2mm import app, gameinfo
 from hd2mm.app import web_dir
 from hd2mm.core import Library
-from hd2mm.server import AppServer
+from hd2mm.server import AppServer, Handler, RASTER_TYPES
+from tests.test_core import ARCHIVE, make_zip
 
 ROOT = Path(__file__).resolve().parent.parent
 LOADER_ZIP = ROOT / "Bingus-Shared-Loader-v17.zip"
@@ -117,9 +118,148 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.lib.game_path, str(self.game))
 
+    def test_mod_images_allow_only_raster_and_have_security_headers(self):
+        files = {f"{ARCHIVE}.patch_0": "patch", "icon.svg": "<svg/>", "page.html": "<html/>"}
+        for ext in RASTER_TYPES:
+            files["image" + ext.upper()] = b"image"
+        files["manifest.json"] = json.dumps({
+            "IconPath": "icon.svg",
+            "Options": [{"Name": "옵션", "Image": "icon.svg", "Include": ["."], "SubOptions": [
+                {"Name": "벡터", "Image": "icon.svg"},
+                {"Name": "그림", "Image": "image.PNG"},
+            ]}],
+        })
+        archive = make_zip(self.tmp / "images.zip", files)
+        mod_id = self.lib.import_archive(archive, archive.name)["id"]
+        prefix = f"/api/mods/{mod_id}/file?path="
+        for name in ("icon.svg", "page.html"):
+            self.assertEqual(self.request(prefix + name)[0], 404)
+        for ext, ctype in RASTER_TYPES.items():
+            with self.subTest(ext=ext):
+                with urllib.request.urlopen(self.base + prefix + "image" + ext.upper(), timeout=5) as res:
+                    self.assertEqual(res.headers["Content-Type"], ctype)
+                    self.assertEqual(res.headers["X-Content-Type-Options"], "nosniff")
+                    self.assertEqual(res.headers["Content-Security-Policy"], "sandbox; default-src 'none'")
+        _, state = self.request("/api/state")
+        mod = state["mods"][0]
+        self.assertIsNone(mod["icon"])
+        self.assertIsNone(mod["options"][0]["image"])
+        self.assertIsNone(mod["options"][0]["subs"][0]["image"])
+        self.assertIn("image.PNG", mod["options"][0]["subs"][1]["image"])
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_post_operations_count_success_failure_and_import(self):
+        def request_finished(path, payload):
+            status, _ = self.request(path, data=payload)
+            # 응답 직후에도 서버의 finally가 실행 중일 수 있다.
+            deadline = time.monotonic() + 2
+            while self.server.active_operations and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.server.active_operations, 0)
+            return status
+
+        def handle(handler, *args):
+            self.assertEqual(self.server.active_operations, 1)
+            if handler.path.startswith("/api/import"):
+                handler._send_json({"ok": True})
+                return
+            return {"ok": True}
+
+        for path, method, payload in (("/api/order", "_post", b"{}"), ("/api/import?name=a.zip", "_import", b"zip")):
+            with self.subTest(path=path):
+                with mock.patch.object(Handler, method, autospec=True, side_effect=handle):
+                    self.assertEqual(request_finished(path, payload), 200)
+                with mock.patch.object(Handler, method, side_effect=ValueError("실패")):
+                    self.assertEqual(request_finished(path, payload), 500)
+        self.assertEqual(request_finished("/api/order", b"invalid"), 400)
+
+    def test_watcher_waits_for_operations_and_new_grace_period(self):
+        server = self.server
+        for connected in (False, True):
+            with self.subTest(connected=connected):
+                server.stopping = False
+                server.ever_connected = connected
+                server.last_change = 0
+                self.assertTrue(server.begin_operation())
+                self.assertTrue(server.begin_operation())
+                now = [200.0]
+                ticks = [0]
+
+                def tick(_):
+                    ticks[0] += 1
+                    now[0] += 1
+                    if ticks[0] == 2:
+                        server.end_operation()
+                    if ticks[0] == 3:
+                        server.end_operation()
+                    if ticks[0] > 130:
+                        self.fail("종료 감시가 끝나지 않음")
+
+                with mock.patch("hd2mm.server.time.monotonic", side_effect=lambda: now[0]), \
+                        mock.patch("hd2mm.server.time.sleep", side_effect=tick), \
+                        mock.patch.object(server, "shutdown") as shutdown:
+                    server._watch_clients()
+                shutdown.assert_called_once()
+                self.assertEqual(ticks[0], 9 if connected else 124)
+                self.assertFalse(server.begin_operation())
+
+
+class InstanceTests(unittest.TestCase):
+    def test_mutex_name_handle_and_existing_instance(self):
+        import ctypes
+
+        kernel = mock.Mock()
+        kernel.CreateMutexW.return_value = 123
+        with tempfile.TemporaryDirectory(prefix="hd2mm-mutex-") as tmp, \
+                mock.patch.object(app.sys, "platform", "win32"), \
+                mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True), \
+                mock.patch.object(ctypes, "get_last_error", return_value=0, create=True) as error, \
+                mock.patch.object(app, "_mutex_handles", []) as handles:
+            path = Path(tmp) / "Data"
+            self.assertTrue(app.acquire_instance_mutex(path))
+            self.assertEqual(handles, [123])
+            name = kernel.CreateMutexW.call_args.args[2]
+            self.assertTrue(name.startswith("Local\\HD2ModManager-"))
+            self.assertEqual(len(name.rsplit("-", 1)[1]), 40)
+            error.return_value = 183
+            self.assertFalse(app.acquire_instance_mutex(Path(tmp) / "data" / "."))
+            self.assertEqual(kernel.CreateMutexW.call_args.args[2], name)
+            kernel.CloseHandle.assert_called_once_with(123)
+            self.assertEqual(handles, [123])
+
+    def test_mutex_non_windows(self):
+        with mock.patch.object(app.sys, "platform", "linux"):
+            self.assertTrue(app.acquire_instance_mutex(Path("unused")))
+
+    def test_duplicate_launch_waits_without_creating_library(self):
+        with tempfile.TemporaryDirectory(prefix="hd2mm-launch-") as tmp, \
+                mock.patch.object(app, "acquire_instance_mutex", return_value=False), \
+                mock.patch.object(app, "Library") as library, \
+                mock.patch.object(app, "running_instance", side_effect=[None, "http://127.0.0.1:1234/"]) as running, \
+                mock.patch.object(app, "open_window") as window, \
+                mock.patch.object(app.time, "sleep"):
+            self.assertEqual(app.main(["--data-dir", tmp]), 0)
+            self.assertEqual(running.call_count, 2)
+            window.assert_called_once_with("http://127.0.0.1:1234/?app=1")
+            library.assert_not_called()
+
+    def test_duplicate_launch_timeout_and_no_window(self):
+        with tempfile.TemporaryDirectory(prefix="hd2mm-launch-") as tmp, \
+                mock.patch.object(app, "acquire_instance_mutex", return_value=False), \
+                mock.patch.object(app, "Library") as library, \
+                mock.patch.object(app, "running_instance", return_value=None) as running, \
+                mock.patch.object(app, "open_window") as window, \
+                mock.patch.object(app, "show_error") as error, \
+                mock.patch.object(app.time, "monotonic", side_effect=[0, 0, 11]), \
+                mock.patch.object(app.time, "sleep"):
+            self.assertEqual(app.main(["--data-dir", tmp]), 1)
+            error.assert_called_once()
+            running.assert_called_once()
+            running.reset_mock()
+            self.assertEqual(app.main(["--data-dir", tmp, "--no-window"]), 1)
+            running.assert_not_called()
+            window.assert_not_called()
+            library.assert_not_called()
+
 
 
 class LifecycleTests(unittest.TestCase):
@@ -141,3 +281,7 @@ class LifecycleTests(unittest.TestCase):
         sock.close()  # 창 닫힘
         thread.join(timeout=20)
         self.assertFalse(thread.is_alive(), "창이 닫히면 스스로 종료해야 함")
+
+
+if __name__ == "__main__":
+    unittest.main()

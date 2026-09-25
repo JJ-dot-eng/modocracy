@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
-from hd2mm.core import Library, ModError, NeedsConfirm, analyze, parse_mod, safe_join
+from hd2mm.core import Library, ModError, NeedsConfirm, PATCH_RE, analyze, clean_guid, parse_mod, safe_join
 
 ROOT = Path(__file__).resolve().parent.parent
 LOADER_ZIP = ROOT / "Bingus-Shared-Loader-v17.zip"
@@ -275,6 +277,119 @@ class SyntheticModTests(TempCase):
         reloaded = Library(self.lib.data_dir)
         self.assertEqual(reloaded.game_path, str(self.game))
         self.assertEqual([m["id"] for m in reloaded.settings["mods"]], [mod_id])
+
+
+class ReviewRegressionTests(TempCase):
+    def import_patch(self, guid=None):
+        files = {f"{ARCHIVE}.patch_0": "original"}
+        if guid:
+            files["manifest.json"] = json.dumps({"Guid": guid})
+        archive = make_zip(self.tmp / "mod.zip", files)
+        return self.lib.import_archive(archive, archive.name)
+
+    def test_changed_deployed_file_requires_confirmation_and_backup(self):
+        self.import_patch()
+        for action in (self.lib.deploy, self.lib.purge):
+            for content in (b"modified", b"different size"):
+                with self.subTest(action=action.__name__, content=content):
+                    self.lib.deploy(self.game)
+                    target = self.game / "data" / f"{ARCHIVE}.patch_0"
+                    old = target.stat()
+                    target.write_bytes(content)
+                    os.utime(target, ns=(old.st_atime_ns, old.st_mtime_ns + 2_000_000_000))
+                    status = self.lib.status(self.game, self.lib.snapshot())
+                    self.assertEqual(status["state"], "broken")
+                    self.assertIn(target.name, status["unmanaged"])
+                    with self.assertRaises(NeedsConfirm) as caught:
+                        action(self.game)
+                    self.assertIn(target.name, caught.exception.unmanaged[0]["files"])
+                    self.assertEqual(target.read_bytes(), content)
+                    result = action(self.game, "move")
+                    self.assertEqual((Path(result["backup"]) / target.name).read_bytes(), content)
+
+    def test_purge_keeps_changed_file(self):
+        self.import_patch()
+        self.lib.deploy(self.game)
+        target = self.game / "data" / f"{ARCHIVE}.patch_0"
+        target.write_bytes(b"external replacement")
+        result = self.lib.purge(self.game, "keep")
+        self.assertEqual(result["removed"], 2)
+        self.assertEqual(self.game_files(), [target.name])
+        self.assertEqual(target.read_bytes(), b"external replacement")
+
+    def test_old_record_uses_size_and_missing_file_is_broken(self):
+        self.import_patch()
+        self.lib.deploy(self.game)
+        record = json.loads(self.lib.record_path.read_text(encoding="utf-8"))
+        for item in record["files"]:
+            self.assertIsInstance(item.pop("mtime"), int)
+        self.lib.record_path.write_text(json.dumps(record), encoding="utf-8")
+        target = self.game / "data" / f"{ARCHIVE}.patch_0"
+        target.write_bytes(b"modified")
+        self.assertEqual(self.lib.status(self.game, self.lib.snapshot())["state"], "ok")
+        target.unlink()
+        status = self.lib.status(self.game, self.lib.snapshot())
+        self.assertEqual(status["state"], "broken")
+        self.assertIn(target.name, status["missing"])
+        self.assertNotIn(target.name, status["unmanaged"])
+
+    def test_partial_copy_leaves_no_patch_or_temp(self):
+        self.import_patch()
+
+        def fail_copy(src, dst):
+            self.assertIsNone(PATCH_RE.match(dst.name))
+            dst.write_bytes(b"partial")
+            raise OSError("복사 실패")
+
+        with mock.patch("hd2mm.core.shutil.copyfile", side_effect=fail_copy):
+            with self.assertRaises(ModError):
+                self.lib.deploy(self.game)
+        self.assertEqual(self.game_files(), [])
+        self.assertEqual(json.loads(self.lib.record_path.read_text(encoding="utf-8"))["files"], [])
+        self.lib.deploy(self.game)
+        self.assertEqual(self.lib.status(self.game, self.lib.snapshot())["state"], "ok")
+
+    def test_replace_failure_cleans_temp(self):
+        self.import_patch()
+        replace = os.replace
+
+        def fail_replace(src, dst):
+            if str(src).endswith(".hd2mm-tmp"):
+                raise OSError("교체 실패")
+            return replace(src, dst)
+
+        with mock.patch("hd2mm.core.os.replace", side_effect=fail_replace):
+            with self.assertRaises(ModError):
+                self.lib.deploy(self.game)
+        self.assertEqual(self.game_files(), [])
+
+    def test_deploy_and_purge_clean_abandoned_temp(self):
+        for action in (self.lib.deploy, self.lib.purge):
+            with self.subTest(action=action.__name__):
+                target = self.game / "data" / f"{ARCHIVE}.patch_0.hd2mm-tmp"
+                target.write_bytes(b"partial")
+                action(self.game)
+                self.assertFalse(target.exists())
+
+    def test_guid_formats_update_existing_folder(self):
+        self.assertEqual(clean_guid("{" + LOADER_ID.replace("-", "").upper() + "}"), LOADER_ID)
+        self.assertIsNone(clean_guid("invalid"))
+        self.assertIsNone(clean_guid(None))
+        result = self.import_patch(LOADER_ID.replace("-", ""))
+        self.assertEqual(result["id"], LOADER_ID)
+        result = self.import_patch(LOADER_ID.upper())
+        self.assertTrue(result["updated"])
+        entry = self.lib.settings["mods"][0]
+        old_id = LOADER_ID.replace("-", "")
+        (self.lib.mods_dir / LOADER_ID).rename(self.lib.mods_dir / old_id)
+        entry["id"] = old_id
+        self.lib.update(old_id, {"enabled": False})
+        result = self.import_patch(LOADER_ID)
+        self.assertTrue(result["updated"])
+        self.assertEqual(result["id"], old_id)
+        self.assertEqual(len(self.lib.settings["mods"]), 1)
+        self.assertFalse(entry["enabled"])
+        self.assertEqual([p.name for p in self.lib.mods_dir.iterdir()], [old_id])
 
 
 if __name__ == "__main__":

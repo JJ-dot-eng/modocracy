@@ -155,7 +155,7 @@ def clean_guid(value) -> str | None:
     if not isinstance(value, str):
         return None
     value = value.strip().strip("{}").lower()
-    return value if GUID_RE.match(value) else None
+    return str(uuid.UUID(value)) if GUID_RE.match(value) else None
 
 
 def version_key(text) -> tuple[int, ...]:
@@ -589,8 +589,10 @@ class Library:
             if not _patch_sets_for(root, info.all_dirs()):
                 raise ModError("이 압축 파일에서 Helldivers 2 모드 파일(.patch_0 등)을 찾지 못했어요.")
             mod_id = info.guid or uuid.uuid4().hex
+            existing = next((m for m in self.settings["mods"] if clean_guid(m["id"]) == clean_guid(mod_id)), None)
+            if existing:
+                mod_id = existing["id"]
             dest = self.mods_dir / mod_id
-            existing = next((m for m in self.settings["mods"] if m["id"] == mod_id), None)
             previous_name = None
             if existing:
                 try:
@@ -695,14 +697,9 @@ class Library:
         record = self._load_record(game_path) or {}
         recorded = {f["name"].lower(): f for f in record.get("files") or [] if isinstance(f, dict) and "name" in f}
         present = scan_game_patch_names(data_dir)
-        unmanaged = [n for n in present if n.lower() not in recorded]
-        missing = []
-        for name, info in recorded.items():
-            try:
-                if (data_dir / info["name"]).stat().st_size != info.get("size"):
-                    missing.append(info["name"])
-            except OSError:
-                missing.append(info["name"])
+        managed = {name for name, info in recorded.items() if self._matches_record(data_dir / info["name"], info)}
+        unmanaged = [n for n in present if n.lower() not in managed]
+        missing = [info["name"] for name, info in recorded.items() if name not in managed]
         if recorded:
             if missing:
                 state = "broken"
@@ -779,10 +776,22 @@ class Library:
         )
         return dest
 
+    @staticmethod
+    def _matches_record(path: Path, info: dict) -> bool:
+        try:
+            stat = path.stat()
+            return stat.st_size == info.get("size") and ("mtime" not in info or stat.st_mtime_ns == info["mtime"])
+        except OSError:
+            return False
+
     def _prepare(self, game_path: Path, snapshot: list[ModSnapshot], unmanaged_mode: str):
         data_dir = game_path / "data"
+        for temp in data_dir.glob("*.hd2mm-tmp"):
+            if temp.is_file():
+                temp.unlink()
         record = self._load_record(game_path) or {}
         recorded = {f["name"].lower(): f for f in record.get("files") or [] if isinstance(f, dict) and "name" in f}
+        recorded = {name: info for name, info in recorded.items() if self._matches_record(data_dir / info["name"], info)}
         present = scan_game_patch_names(data_dir)
         unmanaged = [n for n in present if n.lower() not in recorded]
         if unmanaged and unmanaged_mode == "ask":
@@ -825,11 +834,17 @@ class Library:
             for item in plan:
                 for suffix, src in item.patch.sources():
                     dst = data_dir / (item.target + suffix)
-                    if src is not None:
-                        shutil.copyfile(src, dst)
-                    else:
-                        dst.write_bytes(b"")
-                    written[dst.name.lower()] = {"name": dst.name, "size": dst.stat().st_size}
+                    temp = dst.with_name(dst.name + ".hd2mm-tmp")
+                    try:
+                        if src is not None:
+                            shutil.copyfile(src, temp)
+                        else:
+                            temp.write_bytes(b"")
+                        os.replace(temp, dst)
+                    finally:
+                        temp.unlink(missing_ok=True)
+                    stat = dst.stat()
+                    written[dst.name.lower()] = {"name": dst.name, "size": stat.st_size, "mtime": stat.st_mtime_ns}
                 mods.setdefault(item.mod_id, {"id": item.mod_id, "name": item.mod_name, "targets": []})
                 mods[item.mod_id]["targets"].append(item.target)
             complete = True

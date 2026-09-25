@@ -324,9 +324,9 @@ function toolbar(m) {
       modSwitch(m.enabled, `${m.name} 켜기`, (v) => toggleMod(m.id, v)),
       h('span', null, m.enabled ? '사용 중' : '사용 안 함')),
     h('span', { class: 'spacer' }),
-    h('button', { class: 'btn small', type: 'button', title: '위로 (우선순위 낮추기)', disabled: index <= 0, onclick: () => moveMod(m.id, index - 1) }, icon('up'), '위로'),
-    h('button', { class: 'btn small', type: 'button', title: '아래로 (우선순위 높이기)', disabled: index >= last, onclick: () => moveMod(m.id, index + 1) }, icon('down'), '아래로'),
-    h('button', { class: 'btn small', type: 'button', title: '맨 아래로 (가장 높은 우선순위)', disabled: index >= last, onclick: () => moveMod(m.id, last) }, icon('bottom'), '맨 아래로'),
+    h('button', { class: 'btn small', type: 'button', title: '위로 (우선순위 낮추기)', disabled: index <= 0, onclick: () => moveMod(m.id, (from) => from - 1) }, icon('up'), '위로'),
+    h('button', { class: 'btn small', type: 'button', title: '아래로 (우선순위 높이기)', disabled: index >= last, onclick: () => moveMod(m.id, (from) => from + 1) }, icon('down'), '아래로'),
+    h('button', { class: 'btn small', type: 'button', title: '맨 아래로 (가장 높은 우선순위)', disabled: index >= last, onclick: () => moveMod(m.id, (_, length) => length - 1) }, icon('bottom'), '맨 아래로'),
     h('button', { class: 'btn small', type: 'button', title: '모드 파일이 있는 폴더 열기', onclick: () => openFolder('mod', m.id) }, icon('folder'), '폴더'),
     h('button', { class: 'btn small danger', type: 'button', onclick: () => deleteMod(m) }, icon('trash'), '삭제'));
 }
@@ -341,7 +341,7 @@ function callouts(m) {
     icon(iconFor[issue.level] || 'info'),
     h('div', { class: 'callout-text' }, issue.text),
     issue.fix === 'bottom'
-      ? h('button', { class: 'btn small', type: 'button', onclick: () => moveMod(m.id, state.mods.length - 1) }, '맨 아래로 옮기기')
+      ? h('button', { class: 'btn small', type: 'button', onclick: () => moveMod(m.id, (_, length) => length - 1) }, '맨 아래로 옮기기')
       : null)));
 }
 
@@ -362,21 +362,27 @@ function options(m) {
       return h('label', { class: `option${on ? ' active' : ''}` },
         only ? h('span') : h('input', {
           type: 'checkbox', checked: on, 'aria-label': o.name,
-          onchange: (e) => setModState(m, { enabledOptions: replaceAt(m.state.enabledOptions, i, e.target.checked) }),
+          onchange: (e) => {
+            const checked = e.target.checked;
+            setModState(m.id, (s) => ({ enabledOptions: replaceAt(s.enabledOptions, i, checked) }));
+          },
         }),
         h('div', null,
           h('div', { class: 'option-name' }, o.name),
           o.description ? h('div', { class: 'option-desc' }, o.description) : null,
           o.subs.length ? h('select', {
             'aria-label': `${o.name} 세부 선택`, disabled: !on,
-            onchange: (e) => setModState(m, { selectedSubs: replaceAt(m.state.selectedSubs, i, Number(e.target.value)) }),
+            onchange: (e) => {
+              const value = Number(e.target.value);
+              setModState(m.id, (s) => ({ selectedSubs: replaceAt(s.selectedSubs, i, value) }));
+            },
           }, o.subs.map((s, j) => h('option', { value: String(j), selected: j === m.state.selectedSubs[i] }, s.name))) : null,
           sub?.description ? h('div', { class: 'option-desc' }, sub.description) : null),
         (sub?.image || o.image) ? h('img', { class: 'option-img', src: sub?.image || o.image, alt: '', draggable: 'false' }) : h('span'));
     });
   } else {
     rows = m.options.map((o, i) => h('label', { class: `option${m.state.choice === i ? ' active' : ''}` },
-      h('input', { type: 'radio', name: `choice-${m.id}`, checked: m.state.choice === i, onchange: () => setModState(m, { choice: i }) }),
+      h('input', { type: 'radio', name: `choice-${m.id}`, checked: m.state.choice === i, onchange: () => setModState(m.id, () => ({ choice: i })) }),
       h('div', null, h('div', { class: 'option-name' }, o.name), o.description ? h('div', { class: 'option-desc' }, o.description) : null),
       o.image ? h('img', { class: 'option-img', src: o.image, alt: '', draggable: 'false' }) : h('span')));
   }
@@ -429,25 +435,39 @@ function metaInfo(m) {
 }
 
 // ------------------------------------------------------------ 동작
-async function mutate(fn) {
-  try {
-    await fn();
-  } catch (e) {
-    toast('err', e.message);
-  }
-  await refresh();
+let mutationQueue = Promise.resolve();
+function queueMutation(fn) {
+  const job = mutationQueue.then(async () => {
+    try {
+      return await fn();
+    } finally {
+      await refresh();
+    }
+  });
+  mutationQueue = job.catch(() => {});
+  return job;
 }
 
-const toggleMod = (id, enabled) => mutate(() => api(`/api/mods/${enc(id)}`, { body: { enabled } }));
-const setModState = (m, changes) => mutate(() => api(`/api/mods/${enc(m.id)}`, { body: changes }));
+const queuedApi = (path, options) => queueMutation(() => api(path, options));
+const mutate = (fn) => queueMutation(fn).catch((e) => toast('err', e.message));
+const toggleMod = (id, enabled) => mutate(() => {
+  if (modById(id)) return api(`/api/mods/${enc(id)}`, { body: { enabled } });
+});
+const setModState = (id, changes) => mutate(() => {
+  const m = modById(id);
+  if (m) return api(`/api/mods/${enc(id)}`, { body: changes(m.state) });
+});
 
 function moveMod(id, toIndex) {
-  const ids = state.mods.map((m) => m.id);
-  const from = ids.indexOf(id);
-  if (from < 0 || toIndex < 0 || toIndex >= ids.length || from === toIndex) return;
-  ids.splice(from, 1);
-  ids.splice(toIndex, 0, id);
-  return mutate(() => api('/api/order', { body: { ids } }));
+  return mutate(() => {
+    const ids = state.mods.map((m) => m.id);
+    const from = ids.indexOf(id);
+    const target = toIndex(from, ids.length);
+    if (from < 0 || target < 0 || target >= ids.length || from === target) return;
+    ids.splice(from, 1);
+    ids.splice(target, 0, id);
+    return api('/api/order', { body: { ids } });
+  });
 }
 
 async function deleteMod(m) {
@@ -468,7 +488,7 @@ async function deleteMod(m) {
 
 async function openFolder(target, id) {
   try {
-    await api('/api/open', { body: { target, id } });
+    await queuedApi('/api/open', { body: { target, id } });
   } catch (e) {
     toast('err', e.message);
   }
@@ -487,7 +507,7 @@ async function importFiles(fileList) {
     for (const [i, file] of accepted.entries()) {
       progress.update('loading', `‘${file.name}’ 추가하는 중…${accepted.length > 1 ? ` (${i + 1}/${accepted.length})` : ''}`);
       try {
-        const r = await api(`/api/import?name=${enc(file.name)}`, { file });
+        const r = await queuedApi(`/api/import?name=${enc(file.name)}`, { file });
         selectedId = r.id;
         if (!r.updated) toast('ok', `‘${r.name}’ 모드를 추가했어요.`);
         else if (r.previousName && r.previousName !== r.name) toast('ok', `‘${r.previousName}’을(를) ‘${r.name}’(으)로 업데이트했어요. (같은 모드 ID)`);
@@ -538,7 +558,7 @@ async function runGameAction(kind) {
   try {
     for (;;) {
       try {
-        const r = await api(`/api/${kind}`, { body: { unmanaged: mode } });
+        const r = await queuedApi(`/api/${kind}`, { body: { unmanaged: mode } });
         const moved = r.backup ? ' 원래 있던 모드 파일은 백업 폴더로 옮겼어요.' : '';
         if (kind === 'purge') toast('ok', `게임에서 모드 파일 ${r.removed}개를 제거했어요.${moved}`);
         else if (r.modCount) toast('ok', `적용 완료! 모드 ${r.modCount}개(파일 ${r.fileCount}개)를 게임에 설치했어요.${moved}`);
@@ -600,7 +620,7 @@ async function launchGame() {
     if (choice === 'deploy' && !(await runGameAction('deploy'))) return;
   }
   try {
-    await api('/api/launch-game', { body: {} });
+    await queuedApi('/api/launch-game', { body: {} });
     toast('ok', 'Steam으로 게임을 실행하고 있어요.');
   } catch (e) {
     toast('err', e.message);
@@ -619,7 +639,7 @@ function openSettings() {
     class: 'btn', type: 'button',
     onclick: async () => {
       try {
-        const r = await api('/api/pick-folder', { body: {} });
+        const r = await queuedApi('/api/pick-folder', { body: {} });
         if (r.path) { input.value = r.path; setHelp('', '폴더를 골랐어요. [저장]을 눌러 주세요.'); }
       } catch (e) { setHelp('err', e.message); }
     },
@@ -628,7 +648,7 @@ function openSettings() {
     class: 'btn', type: 'button',
     onclick: async () => {
       try {
-        const r = await api('/api/detect-game', { body: {} });
+        const r = await queuedApi('/api/detect-game', { body: {} });
         if (r.path) { input.value = r.path; setHelp('ok', '게임 폴더를 찾았어요. [저장]을 눌러 주세요.'); }
         else setHelp('err', '자동으로 찾지 못했어요. [찾아보기]로 직접 골라 주세요.');
       } catch (e) { setHelp('err', e.message); }
@@ -659,7 +679,7 @@ function openSettings() {
         label: '저장', kind: 'primary', value: true,
         onClick: async () => {
           try {
-            await api('/api/settings', { body: { gamePath: input.value } });
+            await queuedApi('/api/settings', { body: { gamePath: input.value } });
             toast('ok', '게임 폴더를 저장했어요.');
             await refresh();
             return true;
@@ -691,10 +711,16 @@ function openModal({ title, body, actions, wide = false }) {
       class: `btn ${a.kind || ''}`, type: 'button',
       onclick: async (e) => {
         if (a.onClick) {
-          e.currentTarget.disabled = true;
-          const keep = (await a.onClick()) === false;
-          e.currentTarget.disabled = false;
-          if (keep) return;
+          const button = e.currentTarget;
+          button.disabled = true;
+          try {
+            if ((await a.onClick()) === false) return;
+          } catch (err) {
+            toast('err', err.message);
+            return;
+          } finally {
+            button.disabled = false;
+          }
         }
         close(a.value);
       },
@@ -800,11 +826,13 @@ list.addEventListener('drop', (e) => {
   const target = dropTarget;
   clearDropMarks();
   if (!target) return;
-  const ids = state.mods.map((m) => m.id).filter((id) => id !== moving);
-  let index = ids.indexOf(target.id) + (target.after ? 1 : 0);
-  if (index < 0) index = ids.length;
-  ids.splice(index, 0, moving);
-  mutate(() => api('/api/order', { body: { ids } }));
+  mutate(() => {
+    if (!modById(moving) || !modById(target.id) || moving === target.id) return;
+    const ids = state.mods.map((m) => m.id).filter((id) => id !== moving);
+    const index = ids.indexOf(target.id) + (target.after ? 1 : 0);
+    ids.splice(index, 0, moving);
+    return api('/api/order', { body: { ids } });
+  });
 });
 
 // ------------------------------------------------------------ 시작
